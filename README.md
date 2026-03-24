@@ -35,6 +35,12 @@ position startpos moves e2e4 e7e5
 go depth 8
 ```
 
+Or from a shell, to verify the handshake explicitly:
+
+```bash
+printf 'uci\nisready\nquit\n' | ./aquachess
+```
+
 ## Notes on strength
 
 This engine implements the main architecture used by many classical engines, but Elo depends heavily on tuning, hardware, testing pool, opening books, endgame tablebases, and long-term parameter optimization. It should be meaningfully stronger than a toy engine, but no honest engine author can guarantee 2300-2700 Elo without extensive benchmarking and tuning.

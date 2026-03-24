@@ -926,6 +926,7 @@ int main() {
     using namespace aqua;
     std::ios::sync_with_stdio(false);
     std::cin.tie(nullptr);
+    std::cout.setf(std::ios::unitbuf);
 
     init_tables();
     Position pos;
