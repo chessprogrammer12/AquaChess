@@ -1,6 +1,6 @@
 # AquaChess
 
-AquaChess is a standalone UCI chess engine written in modern C++.
+AquaChess is a standalone UCI chess engine written in modern C++ with a multi-file layout.
 
 ## Features
 
@@ -12,6 +12,7 @@ AquaChess is a standalone UCI chess engine written in modern C++.
 - MVV-LVA capture ordering, killer moves, and history heuristic
 - Basic tapered positional evaluation with piece-square tables, mobility, pawn structure, bishop pair, rook files, and king safety heuristics
 - UCI protocol support
+- Multi-file architecture (`src/main.cpp`, `src/engine.cpp`, `include/aqua/engine.hpp`)
 
 ## Build
 
@@ -44,3 +45,7 @@ printf 'uci\nisready\nquit\n' | ./aquachess
 ## Notes on strength
 
 This engine implements the main architecture used by many classical engines, but Elo depends heavily on tuning, hardware, testing pool, opening books, endgame tablebases, and long-term parameter optimization. It should be meaningfully stronger than a toy engine, but no honest engine author can guarantee 2300-2700 Elo without extensive benchmarking and tuning.
+
+## About strength vs 2000 Elo
+
+With stronger search defaults and this engine architecture, you may beat some ~2000-strength bots in practical games depending on time control and hardware. But Elo is environment-dependent, so this still requires testing and tuning to verify consistent results against a specific 2000 Elo engine.
