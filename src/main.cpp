@@ -867,6 +867,8 @@ std::vector<std::string> split(const std::string &s) {
     return tokens;
 }
 
+constexpr const char *STARTPOS_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
 Move parse_uci_move(Position &pos, const std::string &text, Searcher &searcher) {
     auto moves = searcher.generate_moves(pos, false);
     for (const auto &sm : moves) {
@@ -878,6 +880,46 @@ Move parse_uci_move(Position &pos, const std::string &text, Searcher &searcher) 
     return Move{};
 }
 
+void reset_searcher(Searcher &searcher) {
+    searcher.tt = TranspositionTable{};
+    searcher.history = {};
+    searcher.killers = {};
+    searcher.stopped = false;
+    searcher.nodes = 0;
+    searcher.best_root_move = Move{};
+}
+
+bool apply_position_command(Position &pos, Searcher &searcher, const std::vector<std::string> &tokens) {
+    if (tokens.size() < 2) return false;
+
+    std::size_t idx = 1;
+    if (tokens[idx] == "startpos") {
+        pos.set_fen(STARTPOS_FEN);
+        ++idx;
+    } else if (tokens[idx] == "fen") {
+        if (tokens.size() < idx + 7) return false;
+        std::string fen;
+        for (int i = 0; i < 6; ++i) {
+            if (i != 0) fen += ' ';
+            fen += tokens[idx + 1 + static_cast<std::size_t>(i)];
+        }
+        pos.set_fen(fen);
+        idx += 7;
+    } else {
+        return false;
+    }
+
+    if (idx < tokens.size() && tokens[idx] == "moves") {
+        for (++idx; idx < tokens.size(); ++idx) {
+            Move m = parse_uci_move(pos, tokens[idx], searcher);
+            if (m.raw == 0) return false;
+            Undo u;
+            if (!pos.make_move(m, u)) return false;
+        }
+    }
+    return true;
+}
+
 } // namespace aqua
 
 int main() {
@@ -887,8 +929,7 @@ int main() {
 
     init_tables();
     Position pos;
-    pos.set_fen("rn1qkbnr/pppb1ppp/3pp3/8/2PP4/2N2N2/PP2PPPP/R1BQKB1R w KQkq - 0 1");
-    pos.set_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    pos.set_fen(STARTPOS_FEN);
     Searcher searcher;
 
     std::string line;
@@ -899,50 +940,38 @@ int main() {
         if (tokens[0] == "uci") {
             std::cout << "id name AquaChess\n";
             std::cout << "id author OpenAI\n";
+            std::cout << "option name Hash type spin default 64 min 1 max 64\n";
             std::cout << "uciok\n";
         } else if (tokens[0] == "isready") {
             std::cout << "readyok\n";
         } else if (tokens[0] == "ucinewgame") {
-            pos.set_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-            searcher.tt = TranspositionTable{};
-            searcher.history = {};
-            searcher.killers = {};
-            searcher.stopped = false;
-            searcher.nodes = 0;
-            searcher.best_root_move = Move{};
+            pos.set_fen(STARTPOS_FEN);
+            reset_searcher(searcher);
         } else if (tokens[0] == "position") {
-            std::size_t idx = 1;
-            if (tokens[idx] == "startpos") {
-                pos.set_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-                ++idx;
-            } else if (tokens[idx] == "fen") {
-                std::string fen;
-                for (int i = 0; i < 6 && idx + 1 < tokens.size(); ++i) {
-                    fen += tokens[++idx];
-                    if (i != 5) fen += ' ';
-                }
-                pos.set_fen(fen);
-                ++idx;
+            if (!apply_position_command(pos, searcher, tokens)) {
+                std::cout << "info string invalid position command\n";
             }
-            if (idx < tokens.size() && tokens[idx] == "moves") {
-                for (++idx; idx < tokens.size(); ++idx) {
-                    Move m = parse_uci_move(pos, tokens[idx], searcher);
-                    Undo u;
-                    pos.make_move(m, u);
-                }
-            }
+        } else if (tokens[0] == "setoption") {
+            // Hash is advertised for GUI compatibility; this engine currently keeps a fixed-size table.
+        } else if (tokens[0] == "debug" || tokens[0] == "register") {
+            // Accepted for UCI compatibility.
+        } else if (tokens[0] == "ponderhit") {
+            searcher.stopped = false;
         } else if (tokens[0] == "go") {
             int depth = 6;
             int movetime = 1000;
             int wtime = -1, btime = -1, winc = 0, binc = 0;
-            for (std::size_t i = 1; i + 1 < tokens.size(); ++i) {
-                if (tokens[i] == "depth") depth = std::stoi(tokens[++i]);
-                else if (tokens[i] == "movetime") movetime = std::stoi(tokens[++i]);
-                else if (tokens[i] == "wtime") wtime = std::stoi(tokens[++i]);
-                else if (tokens[i] == "btime") btime = std::stoi(tokens[++i]);
-                else if (tokens[i] == "winc") winc = std::stoi(tokens[++i]);
-                else if (tokens[i] == "binc") binc = std::stoi(tokens[++i]);
+            bool infinite = false;
+            for (std::size_t i = 1; i < tokens.size(); ++i) {
+                if (tokens[i] == "infinite") infinite = true;
+                else if (i + 1 < tokens.size() && tokens[i] == "depth") depth = std::stoi(tokens[++i]);
+                else if (i + 1 < tokens.size() && tokens[i] == "movetime") movetime = std::stoi(tokens[++i]);
+                else if (i + 1 < tokens.size() && tokens[i] == "wtime") wtime = std::stoi(tokens[++i]);
+                else if (i + 1 < tokens.size() && tokens[i] == "btime") btime = std::stoi(tokens[++i]);
+                else if (i + 1 < tokens.size() && tokens[i] == "winc") winc = std::stoi(tokens[++i]);
+                else if (i + 1 < tokens.size() && tokens[i] == "binc") binc = std::stoi(tokens[++i]);
             }
+            if (infinite) movetime = 5000;
             if (wtime >= 0 && btime >= 0) {
                 const int remain = pos.side_to_move == WHITE ? wtime : btime;
                 const int inc = pos.side_to_move == WHITE ? winc : binc;
@@ -950,11 +979,20 @@ int main() {
                 depth = std::min(depth, 64);
             }
             Move best = searcher.search(pos, depth, movetime);
-            std::cout << "bestmove " << move_to_uci(best) << std::endl;
-        } else if (tokens[0] == "quit") {
-            break;
+            if (best.raw == 0) {
+                std::cout << "bestmove 0000" << std::endl;
+            } else {
+                std::cout << "bestmove " << move_to_uci(best) << std::endl;
+            }
         } else if (tokens[0] == "stop") {
             searcher.stopped = true;
+            if (searcher.best_root_move.raw == 0) {
+                std::cout << "bestmove 0000" << std::endl;
+            } else {
+                std::cout << "bestmove " << move_to_uci(searcher.best_root_move) << std::endl;
+            }
+        } else if (tokens[0] == "quit") {
+            break;
         } else if (tokens[0] == "d") {
             for (int rank = 7; rank >= 0; --rank) {
                 for (int file = 0; file < 8; ++file) {
