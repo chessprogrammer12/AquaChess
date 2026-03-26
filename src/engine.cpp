@@ -11,6 +11,8 @@
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <fstream>
+#include <filesystem>
 #include <random>
 #include <sstream>
 #include <string>
@@ -351,6 +353,11 @@ struct Position {
         return square_attacked(king_square(c), static_cast<Color>(c ^ 1));
     }
 
+    bool has_non_pawn_material(Color c) const {
+        const int base = (c == WHITE) ? 0 : 6;
+        return piece_bb[base + KNIGHT] || piece_bb[base + BISHOP] || piece_bb[base + ROOK] || piece_bb[base + QUEEN];
+    }
+
     bool make_move(Move m, Undo &u) {
         u.captured = NO_PIECE;
         u.castling = castling;
@@ -458,6 +465,27 @@ struct Position {
             }
         }
     }
+
+    void make_null(Undo &u) {
+        u.captured = NO_PIECE;
+        u.castling = castling;
+        u.ep = ep_square;
+        u.halfmove = halfmove;
+        u.key = key;
+        if (ep_square != -1) key ^= ZB.ep[file_of(ep_square)];
+        ep_square = -1;
+        side_to_move = static_cast<Color>(side_to_move ^ 1);
+        key ^= ZB.side;
+        ++halfmove;
+    }
+
+    void unmake_null(const Undo &u) {
+        side_to_move = static_cast<Color>(side_to_move ^ 1);
+        castling = u.castling;
+        ep_square = u.ep;
+        halfmove = u.halfmove;
+        key = u.key;
+    }
 };
 
 struct ScoredMove { Move move; int score; };
@@ -489,10 +517,65 @@ struct TranspositionTable {
         e->score = static_cast<std::int16_t>(score);
         e->move = move.raw;
     }
+
+    void resize_mb(int mb) {
+        const int clamped_mb = std::clamp(mb, 1, 1024);
+        const std::size_t entries = static_cast<std::size_t>((clamped_mb * 1024 * 1024) / static_cast<int>(sizeof(TTEntry)));
+        table.assign(std::max<std::size_t>(entries, 1ULL), TTEntry{});
+    }
 };
 
 struct Searcher {
+    struct NnueLite {
+        static constexpr int INPUTS = 768;   // 12 pieces * 64 squares
+        static constexpr int HIDDEN = 64;
+        bool loaded = false;
+        bool enabled = false;
+        std::array<int, INPUTS * HIDDEN> w1{};
+        std::array<int, HIDDEN> b1{};
+        std::array<int, HIDDEN> w2{};
+        int b2 = 0;
+
+        bool load_from_file(const std::string &path) {
+            std::ifstream in(path);
+            if (!in) return false;
+            std::string magic;
+            int inputs = 0;
+            int hidden = 0;
+            in >> magic >> inputs >> hidden;
+            if (!in || magic != "AQUA_NNUE_LITE_V1" || inputs != INPUTS || hidden != HIDDEN) return false;
+            for (int i = 0; i < HIDDEN; ++i) in >> b1[i];
+            for (int i = 0; i < HIDDEN * INPUTS; ++i) in >> w1[i];
+            in >> b2;
+            for (int i = 0; i < HIDDEN; ++i) in >> w2[i];
+            loaded = static_cast<bool>(in);
+            return loaded;
+        }
+
+        int eval(const Position &pos) const {
+            if (!enabled || !loaded) return 0;
+            std::array<int, HIDDEN> hidden{};
+            for (int h = 0; h < HIDDEN; ++h) hidden[h] = b1[h];
+            for (int sq = 0; sq < 64; ++sq) {
+                const int p = pos.board[sq];
+                if (p == NO_PIECE) continue;
+                const int idx = p * 64 + sq;
+                const int base = idx;
+                for (int h = 0; h < HIDDEN; ++h) {
+                    hidden[h] += w1[h * INPUTS + base];
+                }
+            }
+            int out = b2;
+            for (int h = 0; h < HIDDEN; ++h) {
+                const int act = std::max(0, hidden[h]);
+                out += (w2[h] * act) / 256;
+            }
+            return pos.side_to_move == WHITE ? out : -out;
+        }
+    };
+
     TranspositionTable tt;
+    NnueLite nnue{};
     std::array<std::array<int, 64>, 64> history{};
     std::array<std::array<Move, 2>, MAX_PLY> killers{};
     std::chrono::steady_clock::time_point stop_time{};
@@ -599,7 +682,12 @@ struct Searcher {
         const int mg_score = mg[WHITE] - mg[BLACK];
         const int eg_score = eg[WHITE] - eg[BLACK];
         int score = (mg_score * phase + eg_score * (24 - phase)) / 24;
-        return pos.side_to_move == WHITE ? score : -score;
+        score = pos.side_to_move == WHITE ? score : -score;
+        const int nnue_score = nnue.eval(pos);
+        if (nnue.enabled && nnue.loaded) {
+            score = (score * 60 + nnue_score * 40) / 100;
+        }
+        return score;
     }
 
     int score_move(const Position &pos, Move m, int ply, Move tt_move) {
@@ -729,6 +817,7 @@ struct Searcher {
         const bool in_check = pos.in_check(pos.side_to_move);
         if (depth <= 0) return quiescence(pos, alpha, beta, ply);
         if (ply >= MAX_PLY - 1) return evaluate(pos);
+        if (in_check) ++depth;
 
         const int original_alpha = alpha;
         TTEntry *entry = tt.probe(pos.key);
@@ -741,6 +830,16 @@ struct Searcher {
                 if (entry->flag == TT_ALPHA && tt_score <= alpha) return tt_score;
                 if (entry->flag == TT_BETA && tt_score >= beta) return tt_score;
             }
+        }
+
+        if (!root && !in_check && depth >= 3 && pos.has_non_pawn_material(pos.side_to_move)) {
+            Undo nu;
+            pos.make_null(nu);
+            const int reduction = 2;
+            const int score = -negamax(pos, depth - 1 - reduction, -beta, -beta + 1, ply + 1);
+            pos.unmake_null(nu);
+            if (stopped) return 0;
+            if (score >= beta) return beta;
         }
 
         auto moves = generate_moves(pos, false);
@@ -762,7 +861,8 @@ struct Searcher {
             ++legal_moves;
             int score;
             if (i > 0 && depth >= 3 && !in_check && !move.is_capture() && !move.is_promotion()) {
-                score = -negamax(pos, depth - 2, -alpha - 1, -alpha, ply + 1);
+                const int reduction = (depth >= 5 && i > 3) ? 2 : 1;
+                score = -negamax(pos, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1);
                 if (score > alpha) score = -negamax(pos, depth - 1, -beta, -alpha, ply + 1);
             } else {
                 score = -negamax(pos, depth - 1, -beta, -alpha, ply + 1);
@@ -891,6 +991,30 @@ void reset_searcher(Searcher &searcher) {
     searcher.best_root_move = Move{};
 }
 
+std::string to_lower(std::string s) {
+    for (char &c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+bool parse_setoption(const std::vector<std::string> &tokens, std::string &name, std::string &value) {
+    if (tokens.size() < 2) return false;
+    std::size_t i = 1;
+    if (tokens[i] != "name") return false;
+    ++i;
+    for (; i < tokens.size() && tokens[i] != "value"; ++i) {
+        if (!name.empty()) name += ' ';
+        name += tokens[i];
+    }
+    if (i < tokens.size() && tokens[i] == "value") {
+        ++i;
+        for (; i < tokens.size(); ++i) {
+            if (!value.empty()) value += ' ';
+            value += tokens[i];
+        }
+    }
+    return !name.empty();
+}
+
 bool apply_position_command(Position &pos, Searcher &searcher, const std::vector<std::string> &tokens) {
     if (tokens.size() < 2) return false;
 
@@ -945,6 +1069,8 @@ int run_uci() {
             std::cout << "id name AquaChess\n";
             std::cout << "id author OpenAI\n";
             std::cout << "option name Hash type spin default 64 min 1 max 64\n";
+            std::cout << "option name UseNNUE type check default false\n";
+            std::cout << "option name EvalFile type string default <empty>\n";
             std::cout << "uciok\n";
         } else if (tokens[0] == "isready") {
             std::cout << "readyok\n";
@@ -956,7 +1082,33 @@ int run_uci() {
                 std::cout << "info string invalid position command\n";
             }
         } else if (tokens[0] == "setoption") {
-            // Hash is advertised for GUI compatibility; this engine currently keeps a fixed-size table.
+            std::string name;
+            std::string value;
+            if (!parse_setoption(tokens, name, value)) continue;
+            const std::string lname = to_lower(name);
+            const std::string lvalue = to_lower(value);
+            if (lname == "hash") {
+                try {
+                    const int mb = std::stoi(value);
+                    searcher.tt.resize_mb(mb);
+                } catch (...) {
+                    std::cout << "info string invalid hash value\n";
+                }
+            } else if (lname == "usennue") {
+                searcher.nnue.enabled = (lvalue == "true" || lvalue == "1" || lvalue == "on");
+                std::cout << "info string UseNNUE=" << (searcher.nnue.enabled ? "true" : "false") << "\n";
+            } else if (lname == "evalfile") {
+                if (value.empty()) {
+                    searcher.nnue.loaded = false;
+                    std::cout << "info string cleared EvalFile\n";
+                } else if (!std::filesystem::exists(value)) {
+                    std::cout << "info string EvalFile does not exist: " << value << "\n";
+                } else if (!searcher.nnue.load_from_file(value)) {
+                    std::cout << "info string failed to load EvalFile: " << value << "\n";
+                } else {
+                    std::cout << "info string loaded EvalFile: " << value << "\n";
+                }
+            }
         } else if (tokens[0] == "debug" || tokens[0] == "register") {
             // Accepted for UCI compatibility.
         } else if (tokens[0] == "ponderhit") {
