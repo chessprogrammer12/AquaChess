@@ -579,11 +579,13 @@ struct Searcher {
     std::array<std::array<int, 64>, 64> history{};
     std::array<std::array<Move, 2>, MAX_PLY> killers{};
     std::chrono::steady_clock::time_point stop_time{};
+    bool use_time_limit = true;
     std::atomic<bool> stopped = false;
     std::uint64_t nodes = 0;
     Move best_root_move{};
 
     bool time_up() {
+        if (!use_time_limit) return false;
         return std::chrono::steady_clock::now() >= stop_time;
     }
 
@@ -894,10 +896,11 @@ struct Searcher {
         return best_score;
     }
 
-    Move search(Position &pos, int max_depth, int time_ms) {
+    Move search(Position &pos, int max_depth, int time_ms, bool use_time_control = true) {
         stopped = false;
         nodes = 0;
         best_root_move = Move{};
+        use_time_limit = use_time_control;
         stop_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(time_ms);
         int score = 0;
         int alpha = -INF;
@@ -1118,23 +1121,29 @@ int run_uci() {
             int movetime = 1500;
             int wtime = -1, btime = -1, winc = 0, binc = 0;
             bool infinite = false;
+            bool depth_given = false;
+            bool movetime_given = false;
             for (std::size_t i = 1; i < tokens.size(); ++i) {
                 if (tokens[i] == "infinite") infinite = true;
-                else if (i + 1 < tokens.size() && tokens[i] == "depth") depth = std::stoi(tokens[++i]);
-                else if (i + 1 < tokens.size() && tokens[i] == "movetime") movetime = std::stoi(tokens[++i]);
+                else if (i + 1 < tokens.size() && tokens[i] == "depth") { depth = std::stoi(tokens[++i]); depth_given = true; }
+                else if (i + 1 < tokens.size() && tokens[i] == "movetime") { movetime = std::stoi(tokens[++i]); movetime_given = true; }
                 else if (i + 1 < tokens.size() && tokens[i] == "wtime") wtime = std::stoi(tokens[++i]);
                 else if (i + 1 < tokens.size() && tokens[i] == "btime") btime = std::stoi(tokens[++i]);
                 else if (i + 1 < tokens.size() && tokens[i] == "winc") winc = std::stoi(tokens[++i]);
                 else if (i + 1 < tokens.size() && tokens[i] == "binc") binc = std::stoi(tokens[++i]);
             }
+            depth = std::clamp(depth, 1, 20);
+            bool use_time_control = true;
             if (infinite) movetime = 5000;
             if (wtime >= 0 && btime >= 0) {
                 const int remain = pos.side_to_move == WHITE ? wtime : btime;
                 const int inc = pos.side_to_move == WHITE ? winc : binc;
                 movetime = std::max(50, remain / 25 + inc / 2);
-                depth = std::min(depth, 64);
+            } else if (depth_given && !movetime_given && !infinite) {
+                // Pure depth mode: don't cut off early by time.
+                use_time_control = false;
             }
-            Move best = searcher.search(pos, depth, movetime);
+            Move best = searcher.search(pos, depth, movetime, use_time_control);
             if (best.raw == 0) {
                 std::cout << "bestmove 0000" << std::endl;
             } else {

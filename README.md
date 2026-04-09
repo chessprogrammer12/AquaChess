@@ -37,6 +37,8 @@ position startpos moves e2e4 e7e5
 go depth 8
 ```
 
+Depth searches are supported up to depth 20. If you run `go depth N` without clock or movetime parameters, AquaChess now runs in pure depth mode and completes the requested depth.
+
 Or from a shell, to verify the handshake explicitly:
 
 ```bash
