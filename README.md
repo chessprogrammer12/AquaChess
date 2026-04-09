@@ -62,6 +62,27 @@ Current file format is a simple text format:
 
 This lets you train weights locally from your own Lichess PGN/database and plug them into AquaChess.
 
+### Train your own NNUE-lite with NumPy
+
+I added a NumPy trainer script at `tools/train_nnue_numpy.py` so you can train on your own laptop data:
+
+```bash
+python tools/train_nnue_numpy.py --pgn /path/to/lichess_games.pgn --out weights.nnuelite --epochs 8
+```
+
+Or train from a prepared NPZ dataset:
+
+```bash
+python tools/train_nnue_numpy.py --npz /path/to/train_data.npz --out weights.nnuelite --epochs 8
+```
+
+Then load in engine:
+
+```text
+setoption name EvalFile value /absolute/path/to/weights.nnuelite
+setoption name UseNNUE value true
+```
+
 ## Notes on strength
 
 This engine implements the main architecture used by many classical engines, but Elo depends heavily on tuning, hardware, testing pool, opening books, endgame tablebases, and long-term parameter optimization. It should be meaningfully stronger than a toy engine, but no honest engine author can guarantee 2300-2700 Elo without extensive benchmarking and tuning.
